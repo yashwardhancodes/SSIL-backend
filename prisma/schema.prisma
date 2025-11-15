@@ -1,0 +1,112 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Party {
+  id              Int       @id @default(autoincrement())
+  name            String
+  type            String    // 'customer' or 'supplier'
+  contact         String?
+  address         String?
+  gstin           String?
+  openingBalance  Float?    
+  currentBalance  Float?    
+  createdAt       DateTime  @default(now())
+
+  invoices        Invoice[]  // relation with invoices
+  payments        Payment[]  // relation with payments
+
+}
+
+// -------------- ITEM MODEL --------------
+// Represents inventory products or services
+model Item {
+  id             Int         @id @default(autoincrement())
+  name           String
+  unit           String      // e.g. pcs, kg, ltr
+  purchaseRate   Float
+  saleRate       Float
+  taxRate        Float       // GST in %
+  currentStock   Int         @default(0)
+  lowStockAlert  Int?        // optional threshold
+  createdAt      DateTime    @default(now())
+
+  invoiceItems   InvoiceItem[]
+}
+
+// -------------- INVOICE MODEL --------------
+// Represents both Sale & Purchase invoices
+model Invoice {
+  id            Int            @id @default(autoincrement())
+  invoiceNumber String         @unique
+  type          String         // 'sale' or 'purchase'
+  date          DateTime       @default(now())
+
+  subTotal      Float
+  taxTotal      Float
+  discount      Float?         @default(0)
+  grandTotal    Float
+  paidAmount    Float          @default(0)
+  balance       Float          @default(0)
+
+  createdAt     DateTime       @default(now())
+
+  // Relations
+  partyId       Int
+  party         Party          @relation(fields: [partyId], references: [id])
+
+  items         InvoiceItem[]  // invoice line items
+  payments      Payment[]      // optional payments linked to this invoice
+}
+
+// -------------- INVOICE ITEM MODEL --------------
+// Represents each line item in an invoice
+model InvoiceItem {
+  id          Int      @id @default(autoincrement())
+  quantity    Int
+  rate        Float
+  tax         Float
+  total       Float
+
+  invoiceId   Int
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
+
+  itemId      Int
+  item        Item     @relation(fields: [itemId], references: [id])
+}
+
+// -------------- PAYMENT MODEL --------------
+// Represents money received or paid
+model Payment {
+  id          Int       @id @default(autoincrement())
+  type        String    // 'in' for received, 'out' for paid
+  amount      Float
+  mode        String?   // e.g. cash, bank, upi
+  date        DateTime  @default(now())
+  note        String?
+
+  createdAt   DateTime  @default(now())
+
+  // Relations
+  partyId     Int
+  party       Party     @relation(fields: [partyId], references: [id])
+
+  invoiceId   Int?
+  invoice     Invoice?  @relation(fields: [invoiceId], references: [id])
+}
+
+// -------------- EXPENSE MODEL --------------
+// For extra business costs like rent, fuel, etc.
+model Expense {
+  id          Int       @id @default(autoincrement())
+  category    String
+  amount      Float
+  date        DateTime  @default(now())
+  note        String?
+  createdAt   DateTime  @default(now())
+}

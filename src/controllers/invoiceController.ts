@@ -202,3 +202,127 @@ export const deleteInvoice = async (req: Request, res: Response): Promise<void> 
     res.status(500).json({ error: error.message });
   }
 };
+
+
+/* ----------------------------- UPDATE INVOICE ----------------------------- */
+export const updateInvoice = async (req: Request, res: Response): Promise<void> => {
+  const id = Number(req.params.id);
+  const { type, partyId, items, discount = 0, paidAmount = 0 } = req.body;
+
+  if (!type || !partyId || !items || !items.length) {
+    res.status(400).json({ error: "Missing required fields" });
+    return;
+  }
+
+  try {
+    const invoiceNumber = await generateInvoiceNumber(); // or keep old one
+
+    let subTotal = 0;
+    let taxTotal = 0;
+    for (const item of items) {
+      const total = item.quantity * item.rate;
+      const tax = (total * item.taxRate) / 100;
+      subTotal += total;
+      taxTotal += tax;
+    }
+
+    const grandTotal = subTotal + taxTotal - discount;
+    const balance = grandTotal - paidAmount;
+
+    const updatedInvoice = await prisma.$transaction(async (tx) => {
+      // 1. Get old invoice
+      const oldInvoice = await tx.invoice.findUnique({
+        where: { id },
+        include: { items: true },
+      });
+      if (!oldInvoice) throw new Error("Invoice not found");
+
+      // 2. Revert old stock
+      for (const i of oldInvoice.items) {
+        const item = await tx.item.findUnique({ where: { id: i.itemId } });
+        if (!item) continue;
+        const revertStock =
+          oldInvoice.type === "sale"
+            ? item.currentStock + i.quantity
+            : item.currentStock - i.quantity;
+        await tx.item.update({
+          where: { id: i.itemId },
+          data: { currentStock: Math.max(0, revertStock) },
+        });
+      }
+
+      // 3. Revert old party balance
+      const party = await tx.party.findUnique({ where: { id: oldInvoice.partyId } });
+      if (party) {
+        let revertBalance = party.currentBalance ?? 0;
+        revertBalance =
+          oldInvoice.type === "sale"
+            ? revertBalance - oldInvoice.balance
+            : revertBalance + oldInvoice.balance;
+        await tx.party.update({
+          where: { id: oldInvoice.partyId },
+          data: { currentBalance: revertBalance },
+        });
+      }
+
+      // 4. Delete old items
+      await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
+
+      // 5. Create new items + update stock
+      const newItems = items.map((i: any) => ({
+        itemId: i.itemId,
+        quantity: i.quantity,
+        rate: i.rate,
+        tax: (i.rate * i.quantity * i.taxRate) / 100,
+        total: i.quantity * i.rate + (i.rate * i.quantity * i.taxRate) / 100,
+      }));
+
+      for (const i of newItems) {
+        const item = await tx.item.findUnique({ where: { id: i.itemId } });
+        if (!item) continue;
+        const newStock =
+          type === "sale"
+            ? item.currentStock - i.quantity
+            : item.currentStock + i.quantity;
+        await tx.item.update({
+          where: { id: i.itemId },
+          data: { currentStock: Math.max(0, newStock) },
+        });
+      }
+
+      // 6. Update party balance
+      if (party) {
+        let newBalance = party.currentBalance ?? 0;
+        newBalance =
+          type === "sale"
+            ? newBalance + balance
+            : newBalance - balance;
+        await tx.party.update({
+          where: { id: partyId },
+          data: { currentBalance: newBalance },
+        });
+      }
+
+      // 7. Update invoice
+      return await tx.invoice.update({
+        where: { id },
+        data: {
+          type,
+          partyId,
+          subTotal,
+          taxTotal,
+          discount,
+          grandTotal,
+          paidAmount,
+          balance,
+          items: { create: newItems },
+        },
+        include: { items: true, party: true },
+      });
+    });
+
+    res.json(updatedInvoice);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+};

@@ -5,6 +5,7 @@ import { PrismaClient } from "@prisma/client";
 import partyRoutes from "./routes/partyRoutes";
 import itemRoutes from "./routes/itemRoutes";
 import invoiceRoutes from "./routes/invoiceRoutes";
+import paymentRoutes from "./routes/paymentRoutes";
 
 dotenv.config();
 
@@ -23,6 +24,8 @@ app.get("/", (req: Request, res: Response) => {
 app.use("/api/parties", partyRoutes);
 app.use("/api/items", itemRoutes);
 app.use("/api/invoices", invoiceRoutes);
+app.use("/api/payments", paymentRoutes);
+
 
 process.on("SIGINT", async () => {
   await prisma.$disconnect();

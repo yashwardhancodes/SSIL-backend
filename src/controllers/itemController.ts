@@ -1,3 +1,4 @@
+// src/controllers/itemController.ts
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 
@@ -8,41 +9,55 @@ export const createItem = async (req: Request, res: Response): Promise<void> => 
   try {
     const {
       name,
+      hsnSac,           // ← NEW: matches your SC08 invoice
       unit,
-      purchaseRate,
+      purchaseRate = 0,
       saleRate,
-      taxRate,
+      taxRate = 18,
       currentStock = 0,
       lowStockAlert,
     } = req.body;
 
-    // basic validation
-    if (!name || !unit || purchaseRate == null || saleRate == null || taxRate == null) {
-      res.status(400).json({ error: "Missing required fields" });
+    // Required fields validation
+    if (!name?.trim()) {
+      res.status(400).json({ error: "Item name is required" });
+      return;
+    }
+    if (!unit?.trim()) {
+      res.status(400).json({ error: "Unit is required" });
+      return;
+    }
+    if (saleRate == null || saleRate < 0) {
+      res.status(400).json({ error: "Sale rate is required and must be ≥ 0" });
       return;
     }
 
-    const existing = await prisma.item.findFirst({ where: { name } });
+    // Prevent duplicate item names
+    const existing = await prisma.item.findFirst({
+      where: { name: name.trim() },
+    });
     if (existing) {
-      res.status(400).json({ error: "Item with this name already exists" });
+      res.status(400).json({ error: "An item with this name already exists" });
       return;
     }
 
     const item = await prisma.item.create({
       data: {
-        name,
-        unit,
-        purchaseRate: parseFloat(purchaseRate),
-        saleRate: parseFloat(saleRate),
-        taxRate: parseFloat(taxRate),
-        currentStock: parseInt(currentStock, 10),
-        lowStockAlert: lowStockAlert ? parseInt(lowStockAlert, 10) : null,
+        name: name.trim(),
+        hsnSac: hsnSac?.trim() || null,
+        unit: unit.trim(),
+        purchaseRate: parseFloat(purchaseRate.toString()),
+        saleRate: parseFloat(saleRate.toString()),
+        taxRate: parseFloat(taxRate.toString()),
+        currentStock: parseFloat(currentStock.toString()),
+        lowStockAlert: lowStockAlert ? parseFloat(lowStockAlert.toString()) : null,
       },
     });
 
     res.status(201).json(item);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("Create Item Error:", error);
+    res.status(500).json({ error: "Failed to create item" });
   }
 };
 
@@ -50,11 +65,24 @@ export const createItem = async (req: Request, res: Response): Promise<void> => 
 export const getItems = async (_req: Request, res: Response): Promise<void> => {
   try {
     const items = await prisma.item.findMany({
-      orderBy: { id: "desc" },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        hsnSac: true,
+        unit: true,
+        purchaseRate: true,
+        saleRate: true,
+        taxRate: true,
+        currentStock: true,
+        lowStockAlert: true,
+        createdAt: true,
+      },
     });
     res.json(items);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("Get Items Error:", error);
+    res.status(500).json({ error: "Failed to fetch items" });
   }
 };
 
@@ -62,7 +90,15 @@ export const getItems = async (_req: Request, res: Response): Promise<void> => {
 export const getItemById = async (req: Request, res: Response): Promise<void> => {
   try {
     const id = Number(req.params.id);
-    const item = await prisma.item.findUnique({ where: { id } });
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid item ID" });
+      return;
+      return;
+    }
+
+    const item = await prisma.item.findUnique({
+      where: { id },
+    });
 
     if (!item) {
       res.status(404).json({ error: "Item not found" });
@@ -71,7 +107,8 @@ export const getItemById = async (req: Request, res: Response): Promise<void> =>
 
     res.json(item);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("Get Item Error:", error);
+    res.status(500).json({ error: "Failed to fetch item" });
   }
 };
 
@@ -79,8 +116,14 @@ export const getItemById = async (req: Request, res: Response): Promise<void> =>
 export const updateItem = async (req: Request, res: Response): Promise<void> => {
   try {
     const id = Number(req.params.id);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid item ID" });
+      return;
+    }
+
     const {
       name,
+      hsnSac,
       unit,
       purchaseRate,
       saleRate,
@@ -95,22 +138,42 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
+    // Check for duplicate name (excluding current item)
+    if (name && name.trim() !== existing.name) {
+      const duplicate = await prisma.item.findFirst({
+        where: { name: name.trim(), NOT: { id } },
+      });
+      if (duplicate) {
+        res.status(400).json({ error: "Another item with this name already exists" });
+        return;
+      }
+    }
+
     const updatedItem = await prisma.item.update({
       where: { id },
       data: {
-        name: name ?? existing.name,
-        unit: unit ?? existing.unit,
-        purchaseRate: purchaseRate ?? existing.purchaseRate,
-        saleRate: saleRate ?? existing.saleRate,
-        taxRate: taxRate ?? existing.taxRate,
-        currentStock: currentStock ?? existing.currentStock,
-        lowStockAlert: lowStockAlert ?? existing.lowStockAlert,
+        name: name?.trim() ?? existing.name,
+        hsnSac: hsnSac?.trim() || null,
+        unit: unit?.trim() ?? existing.unit,
+        purchaseRate:
+          purchaseRate != null ? parseFloat(purchaseRate) : existing.purchaseRate,
+        saleRate: saleRate != null ? parseFloat(saleRate) : existing.saleRate,
+        taxRate: taxRate != null ? parseFloat(taxRate) : existing.taxRate,
+        currentStock:
+          currentStock != null ? parseFloat(currentStock) : existing.currentStock,
+        lowStockAlert:
+          lowStockAlert !== undefined
+            ? lowStockAlert === null || lowStockAlert === ""
+              ? null
+              : parseFloat(lowStockAlert)
+            : existing.lowStockAlert,
       },
     });
 
     res.json(updatedItem);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("Update Item Error:", error);
+    res.status(500).json({ error: "Failed to update item" });
   }
 };
 
@@ -118,17 +181,28 @@ export const updateItem = async (req: Request, res: Response): Promise<void> => 
 export const deleteItem = async (req: Request, res: Response): Promise<void> => {
   try {
     const id = Number(req.params.id);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid item ID" });
+      return;
+    }
 
-    // prevent delete if item is used in invoices later
-    const linkedInvoice = await prisma.invoiceItem.findFirst({ where: { itemId: id } });
-    if (linkedInvoice) {
-      res.status(400).json({ error: "Cannot delete item linked to an invoice" });
+    // Check if item is used in any invoice
+    const usedInInvoice = await prisma.invoiceItem.findFirst({
+      where: { itemId: id },
+    });
+
+    if (usedInInvoice) {
+      res.status(400).json({
+        error: "Cannot delete item because it is used in one or more invoices",
+      });
       return;
     }
 
     await prisma.item.delete({ where: { id } });
+
     res.json({ message: "Item deleted successfully" });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error("Delete Item Error:", error);
+    res.status(500).json({ error: "Failed to delete item" });
   }
 };

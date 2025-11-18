@@ -13,7 +13,7 @@ router.post("/", createInvoice);
 router.get("/", getInvoices);
 router.get("/:id", getInvoiceById);
 router.delete("/:id", deleteInvoice);
-router.put("/:id", updateInvoice);
+router.patch("/:id", updateInvoice);
 
 
 export default router;

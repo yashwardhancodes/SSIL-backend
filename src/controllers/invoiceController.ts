@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
 // @ts-ignore
-import toWords from "number-to-words";
+import { toWords } from "number-to-words";
 
 const prisma = new PrismaClient();
 

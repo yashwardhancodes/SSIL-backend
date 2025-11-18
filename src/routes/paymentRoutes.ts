@@ -4,6 +4,7 @@ import {
   updatePayment,
   deletePayment,
   getAllPayments,
+  getPaymentById,
 } from "../controllers/paymentController";
 
 const router = express.Router();
@@ -16,5 +17,6 @@ const router = express.Router();
 
  router.delete("/:id", deletePayment);
 
- r
+ router.get("/:id", getPaymentById);
+
 export default router;

@@ -1,5 +1,7 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
+// @ts-ignore
+import toWords from "number-to-words";
 
 const prisma = new PrismaClient();
 
@@ -15,7 +17,18 @@ const generateInvoiceNumber = async (): Promise<string> => {
 
 /* ----------------------------- CREATE INVOICE ----------------------------- */
 export const createInvoice = async (req: Request, res: Response): Promise<void> => {
-  const { type, partyId, items, discount = 0, paidAmount = 0 } = req.body;
+  const {
+    type,
+    partyId,
+    items,
+    siteName,
+    particular,
+    discount = 0,
+    paidAmount = 0,
+    cgstRate = 9,
+    sgstRate = 9,
+    igstRate = 0,
+  } = req.body;
 
   if (!type || !partyId || !items || !items.length) {
     res.status(400).json({ error: "Missing required fields" });
@@ -25,73 +38,102 @@ export const createInvoice = async (req: Request, res: Response): Promise<void> 
   try {
     const invoiceNumber = await generateInvoiceNumber();
 
-    // Calculate totals
+    // 1. Calculate totals
     let subTotal = 0;
-    let taxTotal = 0;
+    const lineItemsForDb: any[] = [];
+
     for (const item of items) {
-      const total = item.quantity * item.rate;
-      const tax = (total * item.taxRate) / 100;
-      subTotal += total;
-      taxTotal += tax;
+      const qty = parseFloat(item.quantity);
+      const rate = parseFloat(item.rate);
+      const amount = qty * rate;
+      subTotal += amount;
+
+      const taxRate = parseFloat(item.taxRate || cgstRate + sgstRate + igstRate);
+      const taxAmount = (amount * taxRate) / 100;
+
+      lineItemsForDb.push({
+        itemId: item.itemId ?? null, // explicitly null if missing
+        hsnSac: item.hsnSac || null,
+        particular: item.particular || item.name || "Service",
+        description: item.description || null,
+        quantity: qty,
+        unit: item.unit || "Month",
+        rate: rate,
+        amount: amount,
+        taxRate: taxRate,
+        taxAmount: taxAmount,
+        total: amount + taxAmount,
+      });
     }
 
-    const grandTotal = subTotal + taxTotal - discount;
+    const cgstAmount = subTotal * (cgstRate / 100);
+    const sgstAmount = subTotal * (sgstRate / 100);
+    const igstAmount = subTotal * (igstRate / 100);
+    const taxTotal = cgstAmount + sgstAmount + igstAmount;
+
+    let totalBeforeRound = subTotal + taxTotal - discount;
+    const roundedTotal = Math.round(totalBeforeRound);
+    const roundOff = roundedTotal - totalBeforeRound;
+    const grandTotal = roundedTotal;
     const balance = grandTotal - paidAmount;
 
-    // Transaction ensures all updates succeed together
+    const amountInWords = toWords.convert(Math.floor(grandTotal)) + " Rupees Only";
+
+    // 2. Transaction
     const invoice = await prisma.$transaction(async (tx) => {
-      // 1️⃣ Create invoice
       const createdInvoice = await tx.invoice.create({
         data: {
           invoiceNumber,
           type,
           partyId,
+          date: new Date(),
+          siteName,
+          particular,
           subTotal,
-          taxTotal,
+          cgstRate,
+          sgstRate,
+          igstRate,
+          cgstAmount,
+          sgstAmount,
+          igstAmount,
           discount,
+          roundOff,
           grandTotal,
+          amountInWords,
           paidAmount,
           balance,
-          items: {
-            create: items.map((i: any) => ({
-              itemId: i.itemId,
-              quantity: i.quantity,
-              rate: i.rate,
-              tax: (i.rate * i.quantity * i.taxRate) / 100,
-              total: i.quantity * i.rate + (i.rate * i.quantity * i.taxRate) / 100,
-            })),
-          },
+          items: { create: lineItemsForDb },
         },
-        include: { items: true },
+        include: { items: true, party: true },
       });
 
-      // 2️⃣ Adjust stock for each item
+      // Stock update (only if linked to Item)
       for (const i of items) {
-        const item = await tx.item.findUnique({ where: { id: i.itemId } });
+        if (!i.itemId) continue;
+
+        const item = await tx.item.findUnique({
+          where: { id: i.itemId }, // safe: i.itemId is number here
+        });
         if (!item) continue;
 
-        let updatedStock =
+        const updatedStock =
           type === "sale"
-            ? item.currentStock - i.quantity
-            : item.currentStock + i.quantity;
-
-        if (updatedStock < 0) updatedStock = 0;
+            ? item.currentStock - parseFloat(i.quantity)
+            : item.currentStock + parseFloat(i.quantity);
 
         await tx.item.update({
           where: { id: i.itemId },
-          data: { currentStock: updatedStock },
+          data: { currentStock: Math.max(0, updatedStock) },
         });
       }
 
-      // 3️⃣ Update Party balance
+      // Update party balance
       const party = await tx.party.findUnique({ where: { id: partyId } });
       if (party) {
-        let newBalance = party.currentBalance ?? 0;
-
-        newBalance =
+        const newBalance =
           type === "sale"
-            ? newBalance + balance // customer owes
-            : newBalance - balance; // supplier payable
+            ? (party.currentBalance || 0) + balance
+            : (party.currentBalance || 0) - balance;
 
         await tx.party.update({
           where: { id: partyId },
@@ -104,7 +146,8 @@ export const createInvoice = async (req: Request, res: Response): Promise<void> 
 
     res.status(201).json(invoice);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: error.message || "Internal server error" });
   }
 };
 
@@ -120,7 +163,7 @@ export const getInvoices = async (_req: Request, res: Response): Promise<void> =
     });
     res.json(invoices);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.message || "Internal server error" });
   }
 };
 
@@ -128,6 +171,11 @@ export const getInvoices = async (_req: Request, res: Response): Promise<void> =
 export const getInvoiceById = async (req: Request, res: Response): Promise<void> => {
   try {
     const id = Number(req.params.id);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid invoice ID" });
+      return;
+    }
+
     const invoice = await prisma.invoice.findUnique({
       where: { id },
       include: {
@@ -143,7 +191,7 @@ export const getInvoiceById = async (req: Request, res: Response): Promise<void>
 
     res.json(invoice);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error.message || "Internal server error" });
   }
 };
 
@@ -151,9 +199,12 @@ export const getInvoiceById = async (req: Request, res: Response): Promise<void>
 export const deleteInvoice = async (req: Request, res: Response): Promise<void> => {
   try {
     const id = Number(req.params.id);
+    if (isNaN(id)) {
+      res.status(400).json({ error: "Invalid invoice ID" });
+      return;
+    }
 
     await prisma.$transaction(async (tx) => {
-      // get invoice
       const invoice = await tx.invoice.findUnique({
         where: { id },
         include: { items: true },
@@ -161,8 +212,10 @@ export const deleteInvoice = async (req: Request, res: Response): Promise<void> 
 
       if (!invoice) throw new Error("Invoice not found");
 
-      // revert stock
+      // Revert stock
       for (const i of invoice.items) {
+        if (!i.itemId) continue;
+
         const item = await tx.item.findUnique({ where: { id: i.itemId } });
         if (!item) continue;
 
@@ -172,12 +225,12 @@ export const deleteInvoice = async (req: Request, res: Response): Promise<void> 
             : item.currentStock - i.quantity;
 
         await tx.item.update({
-          where: { id: item.id },
-          data: { currentStock: updatedStock },
+          where: { id: i.itemId },
+          data: { currentStock: Math.max(0, updatedStock) },
         });
       }
 
-      // revert party balance
+      // Revert party balance
       const party = await tx.party.findUnique({ where: { id: invoice.partyId } });
       if (party) {
         let newBalance = party.currentBalance ?? 0;
@@ -187,27 +240,43 @@ export const deleteInvoice = async (req: Request, res: Response): Promise<void> 
             : newBalance + invoice.balance;
 
         await tx.party.update({
-          where: { id: party.id },
+          where: { id: invoice.partyId },
           data: { currentBalance: newBalance },
         });
       }
 
-      // delete invoice + items
+      // Delete related items first, then invoice
       await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
       await tx.invoice.delete({ where: { id } });
     });
 
     res.json({ message: "Invoice deleted successfully" });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: error.message || "Failed to delete invoice" });
   }
 };
-
 
 /* ----------------------------- UPDATE INVOICE ----------------------------- */
 export const updateInvoice = async (req: Request, res: Response): Promise<void> => {
   const id = Number(req.params.id);
-  const { type, partyId, items, discount = 0, paidAmount = 0 } = req.body;
+  if (isNaN(id)) {
+    res.status(400).json({ error: "Invalid invoice ID" });
+    return;
+  }
+
+  const {
+    type,
+    partyId,
+    items,
+    siteName,
+    particular,
+    discount = 0,
+    paidAmount = 0,
+    cgstRate = 9,
+    sgstRate = 9,
+    igstRate = 0,
+  } = req.body;
 
   if (!type || !partyId || !items || !items.length) {
     res.status(400).json({ error: "Missing required fields" });
@@ -215,20 +284,6 @@ export const updateInvoice = async (req: Request, res: Response): Promise<void> 
   }
 
   try {
-    const invoiceNumber = await generateInvoiceNumber(); // or keep old one
-
-    let subTotal = 0;
-    let taxTotal = 0;
-    for (const item of items) {
-      const total = item.quantity * item.rate;
-      const tax = (total * item.taxRate) / 100;
-      subTotal += total;
-      taxTotal += tax;
-    }
-
-    const grandTotal = subTotal + taxTotal - discount;
-    const balance = grandTotal - paidAmount;
-
     const updatedInvoice = await prisma.$transaction(async (tx) => {
       // 1. Get old invoice
       const oldInvoice = await tx.invoice.findUnique({
@@ -237,85 +292,138 @@ export const updateInvoice = async (req: Request, res: Response): Promise<void> 
       });
       if (!oldInvoice) throw new Error("Invoice not found");
 
+      if (oldInvoice.paidAmount > 0) {
+        throw new Error("Cannot edit a paid invoice");
+      }
+
       // 2. Revert old stock
       for (const i of oldInvoice.items) {
+        if (!i.itemId) continue;
         const item = await tx.item.findUnique({ where: { id: i.itemId } });
         if (!item) continue;
+
         const revertStock =
           oldInvoice.type === "sale"
             ? item.currentStock + i.quantity
             : item.currentStock - i.quantity;
+
         await tx.item.update({
           where: { id: i.itemId },
           data: { currentStock: Math.max(0, revertStock) },
         });
       }
 
-      // 3. Revert old party balance
-      const party = await tx.party.findUnique({ where: { id: oldInvoice.partyId } });
-      if (party) {
-        let revertBalance = party.currentBalance ?? 0;
-        revertBalance =
+      // Revert old party balance
+      const oldParty = await tx.party.findUnique({ where: { id: oldInvoice.partyId } });
+      if (oldParty) {
+        const revertBalance =
           oldInvoice.type === "sale"
-            ? revertBalance - oldInvoice.balance
-            : revertBalance + oldInvoice.balance;
+            ? (oldParty.currentBalance || 0) - oldInvoice.balance
+            : (oldParty.currentBalance || 0) + oldInvoice.balance;
+
         await tx.party.update({
           where: { id: oldInvoice.partyId },
           data: { currentBalance: revertBalance },
         });
       }
 
-      // 4. Delete old items
+      // 3. Delete old line items
       await tx.invoiceItem.deleteMany({ where: { invoiceId: id } });
 
-      // 5. Create new items + update stock
-      const newItems = items.map((i: any) => ({
-        itemId: i.itemId,
-        quantity: i.quantity,
-        rate: i.rate,
-        tax: (i.rate * i.quantity * i.taxRate) / 100,
-        total: i.quantity * i.rate + (i.rate * i.quantity * i.taxRate) / 100,
-      }));
+      // 4. Recalculate everything (same logic as create)
+      let subTotal = 0;
+      const lineItemsForDb: any[] = [];
 
-      for (const i of newItems) {
+      for (const item of items) {
+        const qty = parseFloat(item.quantity);
+        const rate = parseFloat(item.rate);
+        const amount = qty * rate;
+        subTotal += amount;
+
+        const taxRate = parseFloat(item.taxRate || cgstRate + sgstRate + igstRate);
+        const taxAmount = (amount * taxRate) / 100;
+
+        lineItemsForDb.push({
+          itemId: item.itemId ?? null,
+          hsnSac: item.hsnSac || null,
+          particular: item.particular || item.name || "Service",
+          description: item.description || null,
+          quantity: qty,
+          unit: item.unit || "Month",
+          rate,
+          amount,
+          taxRate,
+          taxAmount,
+          total: amount + taxAmount,
+        });
+      }
+
+      const cgstAmount = subTotal * (cgstRate / 100);
+      const sgstAmount = subTotal * (sgstRate / 100);
+      const igstAmount = subTotal * (igstRate / 100);
+      const taxTotal = cgstAmount + sgstAmount + igstAmount;
+
+      let totalBeforeRound = subTotal + taxTotal - discount;
+      const roundedTotal = Math.round(totalBeforeRound);
+      const roundOff = roundedTotal - totalBeforeRound;
+      const grandTotal = roundedTotal;
+      const balance = grandTotal - paidAmount;
+
+      const amountInWords = toWords.convert(Math.floor(grandTotal)) + " Rupees Only";
+
+      // 5. Apply new stock
+      for (const i of items) {
+        if (!i.itemId) continue;
         const item = await tx.item.findUnique({ where: { id: i.itemId } });
         if (!item) continue;
+
         const newStock =
           type === "sale"
-            ? item.currentStock - i.quantity
-            : item.currentStock + i.quantity;
+            ? item.currentStock - parseFloat(i.quantity)
+            : item.currentStock + parseFloat(i.quantity);
+
         await tx.item.update({
           where: { id: i.itemId },
           data: { currentStock: Math.max(0, newStock) },
         });
       }
 
-      // 6. Update party balance
+      // 6. Update party balance with new values
+      const party = await tx.party.findUnique({ where: { id: partyId } });
       if (party) {
-        let newBalance = party.currentBalance ?? 0;
-        newBalance =
+        const newBalance =
           type === "sale"
-            ? newBalance + balance
-            : newBalance - balance;
+            ? (party.currentBalance || 0) + balance
+            : (party.currentBalance || 0) - balance;
+
         await tx.party.update({
           where: { id: partyId },
           data: { currentBalance: newBalance },
         });
       }
 
-      // 7. Update invoice
+      // 7. Final invoice update
       return await tx.invoice.update({
         where: { id },
         data: {
           type,
           partyId,
+          siteName,
+          particular,
           subTotal,
-          taxTotal,
+          cgstRate,
+          sgstRate,
+          igstRate,
+          cgstAmount,
+          sgstAmount,
+          igstAmount,
           discount,
+          roundOff,
           grandTotal,
+          amountInWords,
           paidAmount,
           balance,
-          items: { create: newItems },
+          items: { create: lineItemsForDb },
         },
         include: { items: true, party: true },
       });
@@ -323,6 +431,7 @@ export const updateInvoice = async (req: Request, res: Response): Promise<void> 
 
     res.json(updatedInvoice);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error(error);
+    res.status(500).json({ error: error.message || "Failed to update invoice" });
   }
 };

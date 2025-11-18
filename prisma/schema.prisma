@@ -7,100 +7,114 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/* ====================== PARTY ====================== */
 model Party {
   id             Int      @id @default(autoincrement())
   name           String
-  type           String // 'customer' or 'supplier'
+  type           String   // 'customer' or 'supplier'
   contact        String?
   address        String?
   gstin          String?
-  openingBalance Float?
-  currentBalance Float?
+  state          String?
+  stateCode      String?
+  openingBalance Float?   @default(0)
+  currentBalance Float?   @default(0)
   createdAt      DateTime @default(now())
 
-  invoices Invoice[] // relation with invoices
-  payments Payment[] // relation with payments
+  invoices Invoice[]
+  payments Payment[]
 }
 
-// -------------- ITEM MODEL --------------
-// Represents inventory products or services
+/* ====================== ITEM ====================== */
 model Item {
   id            Int      @id @default(autoincrement())
   name          String
-  unit          String // e.g. pcs, kg, ltr
-  purchaseRate  Float
-  saleRate      Float
-  taxRate       Float // GST in %
-  currentStock  Int      @default(0)
-  lowStockAlert Int? // optional threshold
+  hsnSac        String?
+  unit          String   // pcs, kg, Month, etc.
+  purchaseRate  Float    @default(0)
+  saleRate      Float    @default(0)
+  taxRate       Float    @default(18)
+  currentStock  Float    @default(0)
+  lowStockAlert Float?
   createdAt     DateTime @default(now())
 
-  invoiceItems InvoiceItem[]
+  invoiceItems  InvoiceItem[]
 }
 
-// -------------- INVOICE MODEL --------------
-// Represents both Sale & Purchase invoices
+/* ====================== INVOICE ====================== */
 model Invoice {
-  id            Int      @id @default(autoincrement())
-  invoiceNumber String   @unique
-  type          String // 'sale' or 'purchase'
-  date          DateTime @default(now())
+  id              Int      @id @default(autoincrement())
+  invoiceNumber   String   @unique
+  type            String   // 'sale' or 'purchase'
+  date            DateTime @default(now())
 
-  subTotal   Float
-  taxTotal   Float
-  discount   Float?   @default(0)
-  grandTotal Float
-  paidAmount Float    @default(0)
-  balance    Float    @default(0)
-  status     String   @default("draft") // ← ADD
-  createdAt  DateTime @default(now())
+  partyId         Int
+  party           Party    @relation(fields: [partyId], references: [id])
 
-  // Relations
-  partyId Int
-  party   Party @relation(fields: [partyId], references: [id])
+  siteName        String?
+  particular      String?
 
-  items    InvoiceItem[] // invoice line items
-  payments Payment[] // optional payments linked to this invoice
+  subTotal        Float
+  cgstRate        Float    @default(9)
+  sgstRate        Float    @default(9)
+  igstRate        Float    @default(0)
+  cgstAmount      Float    @default(0)
+  sgstAmount      Float    @default(0)
+  igstAmount      Float    @default(0)
+  discount        Float    @default(0)
+  roundOff        Float    @default(0)
+  grandTotal      Float
+  amountInWords   String?
+  paidAmount      Float    @default(0)
+  balance         Float
+  status          String   @default("draft")
+
+  createdAt       DateTime @default(now())
+  items           InvoiceItem[]
+  payments        Payment[]
 }
 
-// -------------- INVOICE ITEM MODEL --------------
-// Represents each line item in an invoice
+/* ====================== INVOICE ITEM ====================== */
 model InvoiceItem {
-  id       Int   @id @default(autoincrement())
-  quantity Int
-  rate     Float
-  tax      Float
-  total    Float
+  id          Int     @id @default(autoincrement())
+  invoiceId   Int
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
 
-  invoiceId Int
-  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+  itemId      Int?
+  item        Item?   @relation(fields: [itemId], references: [id])
 
-  itemId Int
-  item   Item @relation(fields: [itemId], references: [id])
+  // ────── NEW FIELDS (ALL OPTIONAL OR WITH DEFAULT) ──────
+  hsnSac      String?           // e.g., "997319"
+  particular  String?           // "JCB Hired on Monthly Basis..."
+  description String?
+  quantity    Float     @default(1)
+  unit        String?           // "Month", "Day", etc.
+  rate        Float     @default(0)
+  amount      Float     @default(0)    // quantity × rate
+  taxRate     Float     @default(18)
+  taxAmount   Float     @default(0)
+  total       Float     @default(0)    // amount + taxAmount
 }
 
-// -------------- PAYMENT MODEL --------------
-// Represents money received or paid
+/* ====================== PAYMENT ====================== */
 model Payment {
-  id     Int      @id @default(autoincrement())
-  type   String // 'in' for received, 'out' for paid
-  amount Float
-  mode   String? // e.g. cash, bank, upi
-  date   DateTime @default(now())
-  note   String?
+  id        Int      @id @default(autoincrement())
+  type      String   // 'in' or 'out'
+  amount    Float
+  mode      String?
+  date      DateTime @default(now())
+  note      String?
 
-  createdAt DateTime @default(now())
-
-  // Relations
-  partyId Int
-  party   Party @relation(fields: [partyId], references: [id])
+  partyId   Int
+  party     Party    @relation(fields: [partyId], references: [id])
 
   invoiceId Int?
   invoice   Invoice? @relation(fields: [invoiceId], references: [id])
+
+  createdAt DateTime @default(now())
 }
 
-// -------------- EXPENSE MODEL --------------
-// For extra business costs like rent, fuel, etc.
+/* ====================== EXPENSE ====================== */
 model Expense {
   id        Int      @id @default(autoincrement())
   category  String

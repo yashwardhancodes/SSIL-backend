@@ -44,6 +44,33 @@ export const getAllPayments = async (req: Request, res: Response) => {
   }
 };
 
+export const getPaymentById = async (req: Request, res: Response) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!id) {
+      return res.status(400).json({ error: "Invalid payment ID" });
+    }
+
+    const payment = await prisma.payment.findUnique({
+      where: { id },
+      include: {
+        party: true,
+        invoice: true,
+      },
+    });
+
+    if (!payment) {
+      return res.status(404).json({ error: "Payment not found" });
+    }
+
+    res.json(payment);
+  } catch (error: any) {
+    console.error("Get payment error:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch payment" });
+  }
+};
+
 
 export const createPayment = async (req: Request, res: Response) => {
   const {

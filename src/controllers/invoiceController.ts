@@ -1,7 +1,6 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
- 
-import numberToWords from "number-to-words";
+import { toWords } from "number-to-words-converter";
 const prisma = new PrismaClient();
 
 /* ------------------------- Helper: Generate Invoice Number ------------------------- */
@@ -76,8 +75,7 @@ export const createInvoice = async (req: Request, res: Response): Promise<void> 
     const grandTotal = roundedTotal;
     const balance = grandTotal - paidAmount;
 
-    const amountInWords = numberToWords(Math.floor(grandTotal)) + " Rupees Only";
-
+const amountInWords = toWords(Math.floor(grandTotal)) + " Rupees Only";
     // 2. Transaction
     const invoice = await prisma.$transaction(async (tx) => {
       const createdInvoice = await tx.invoice.create({
@@ -368,7 +366,7 @@ export const updateInvoice = async (req: Request, res: Response): Promise<void> 
       const grandTotal = roundedTotal;
       const balance = grandTotal - paidAmount;
 
-const amountInWords = numberToWords(Math.floor(grandTotal)) + " Rupees Only";
+const amountInWords = toWords(Math.floor(grandTotal)) + " Rupees Only";
       // 5. Apply new stock
       for (const i of items) {
         if (!i.itemId) continue;

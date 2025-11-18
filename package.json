@@ -20,7 +20,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "number-to-words": "^1.2.4",
+    "number-to-words-converter": "^1.0.0",
     "prisma": "^6.19.0"
   },
   "devDependencies": {

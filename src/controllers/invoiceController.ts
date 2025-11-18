@@ -1,7 +1,6 @@
 import { Request, Response } from "express";
 import { PrismaClient } from "@prisma/client";
-import { toWords } from "number-to-words-converter";
-const prisma = new PrismaClient();
+ const prisma = new PrismaClient();
 
 /* ------------------------- Helper: Generate Invoice Number ------------------------- */
 const generateInvoiceNumber = async (): Promise<string> => {
@@ -11,6 +10,47 @@ const generateInvoiceNumber = async (): Promise<string> => {
 
   const nextId = (lastInvoice?.id ?? 0) + 1;
   return `INV-${nextId.toString().padStart(4, "0")}`;
+};
+
+// ──────────────────────────────────────────────────────────────
+// NUMBER TO WORDS – PURE JS, NO DEPENDENCIES, WORKS EVERYWHERE
+// ──────────────────────────────────────────────────────────────
+const numberToWordsIndian = (num: number): string => {
+  if (num === 0) return "Zero";
+
+  const belowTwenty = [
+    "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+    "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"
+  ];
+
+  const tens = [
+    "", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"
+  ];
+
+  const thousands = ["", "Thousand", "Lakh", "Crore"];
+
+  const toWordsHelper = (n: number): string => {
+    if (n < 20) return belowTwenty[n];
+    if (n < 100) return tens[Math.floor(n / 10)] + (n % 10 ? " " + belowTwenty[n % 10] : "");
+    if (n < 1000) return belowTwenty[Math.floor(n / 100)] + " Hundred" + (n % 100 ? " " + toWordsHelper(n % 100) : "");
+    return "";
+  };
+
+  let result = "";
+  let groupIndex = 0;
+
+  while (num > 0) {
+    const group = num % 1000;
+    if (group !== 0) {
+      let groupStr = toWordsHelper(group);
+      if (groupIndex > 0) groupStr += " " + thousands[groupIndex];
+      result = groupStr + (result ? " " + result : "");
+    }
+    num = Math.floor(num / 1000);
+    groupIndex++;
+  }
+
+  return result.trim();
 };
 
 /* ----------------------------- CREATE INVOICE ----------------------------- */
@@ -75,7 +115,7 @@ export const createInvoice = async (req: Request, res: Response): Promise<void> 
     const grandTotal = roundedTotal;
     const balance = grandTotal - paidAmount;
 
-const amountInWords = toWords(Math.floor(grandTotal)) + " Rupees Only";
+const amountInWords = numberToWordsIndian(Math.floor(grandTotal)) + " Rupees Only";
     // 2. Transaction
     const invoice = await prisma.$transaction(async (tx) => {
       const createdInvoice = await tx.invoice.create({
@@ -366,7 +406,7 @@ export const updateInvoice = async (req: Request, res: Response): Promise<void> 
       const grandTotal = roundedTotal;
       const balance = grandTotal - paidAmount;
 
-const amountInWords = toWords(Math.floor(grandTotal)) + " Rupees Only";
+const amountInWords = numberToWordsIndian(Math.floor(grandTotal)) + " Rupees Only";
       // 5. Apply new stock
       for (const i of items) {
         if (!i.itemId) continue;

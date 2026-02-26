@@ -3,8 +3,23 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-/* ----------------------------- CREATE PARTY ----------------------------- */
-export const createParty = async (req: Request, res: Response): Promise<void> => {
+/* =====================================================
+   HELPER: Adjust Opening Based on Type
+   Customer  -> Positive
+   Supplier  -> Negative
+===================================================== */
+const adjustOpeningByType = (type: string, amount: number) => {
+  const numeric = Math.abs(amount || 0);
+  return type === "supplier" ? -numeric : numeric;
+};
+
+/* =====================================================
+   CREATE PARTY
+===================================================== */
+export const createParty = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const {
       name,
@@ -13,7 +28,6 @@ export const createParty = async (req: Request, res: Response): Promise<void> =>
       address,
       gstin,
       openingBalance = 0,
-      currentBalance,
     } = req.body;
 
     if (!name || !type) {
@@ -21,7 +35,16 @@ export const createParty = async (req: Request, res: Response): Promise<void> =>
       return;
     }
 
-    // By default, if no currentBalance is passed → same as openingBalance
+    if (!["customer", "supplier"].includes(type)) {
+      res.status(400).json({ error: "Invalid party type" });
+      return;
+    }
+
+    const numericOpening = parseFloat(openingBalance) || 0;
+
+    // ✅ Adjust sign based on party type
+    const adjustedOpening = adjustOpeningByType(type, numericOpening);
+
     const party = await prisma.party.create({
       data: {
         name,
@@ -29,8 +52,8 @@ export const createParty = async (req: Request, res: Response): Promise<void> =>
         contact,
         address,
         gstin,
-        openingBalance,
-        currentBalance: currentBalance ?? openingBalance,
+        openingBalance: adjustedOpening,
+        currentBalance: adjustedOpening, // Start from opening
       },
     });
 
@@ -40,29 +63,43 @@ export const createParty = async (req: Request, res: Response): Promise<void> =>
   }
 };
 
-/* ------------------------------ GET ALL PARTIES ------------------------------ */
-export const getParties = async (_req: Request, res: Response): Promise<void> => {
+/* =====================================================
+   GET ALL PARTIES
+===================================================== */
+export const getParties = async (
+  _req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const parties = await prisma.party.findMany({
       orderBy: { id: "desc" },
       include: {
-        _count: { select: { invoices: true, payments: true } }, // future use
+        _count: {
+          select: { invoices: true, payments: true },
+        },
       },
     });
+
     res.json(parties);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 };
 
-/* ------------------------------ GET SINGLE PARTY ------------------------------ */
-export const getPartyById = async (req: Request, res: Response): Promise<void> => {
+/* =====================================================
+   GET SINGLE PARTY
+===================================================== */
+export const getPartyById = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const id = Number(req.params.id);
+
     const party = await prisma.party.findUnique({
       where: { id },
       include: {
-        invoices: true, // ready for future
+        invoices: true,
         payments: true,
       },
     });
@@ -78,36 +115,75 @@ export const getPartyById = async (req: Request, res: Response): Promise<void> =
   }
 };
 
-/* ------------------------------ UPDATE PARTY ------------------------------ */
-export const updateParty = async (req: Request, res: Response): Promise<void> => {
+/* =====================================================
+   UPDATE PARTY (ACCOUNTING SAFE)
+===================================================== */
+export const updateParty = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const id = Number(req.params.id);
-    const {
-      name,
-      type,
-      contact,
-      address,
-      gstin,
-      openingBalance,
-      currentBalance,
-    } = req.body;
+    const { name, type, contact, address, gstin, openingBalance } = req.body;
 
-    const existing = await prisma.party.findUnique({ where: { id } });
+    const existing = await prisma.party.findUnique({
+      where: { id },
+    });
+
     if (!existing) {
       res.status(404).json({ error: "Party not found" });
       return;
+    }
+
+    const newType = type ?? existing.type;
+
+    if (!["customer", "supplier"].includes(newType)) {
+      res.status(400).json({ error: "Invalid party type" });
+      return;
+    }
+
+    let newOpening = existing.openingBalance || 0;
+    let newCurrent = existing.currentBalance || 0;
+
+    /* -------------------------------
+       CASE 1: Opening balance changed
+    -------------------------------- */
+    if (openingBalance !== undefined) {
+      const numericOpening = parseFloat(openingBalance) || 0;
+
+      const adjustedOpening = adjustOpeningByType(
+        newType,
+        numericOpening
+      );
+
+      const difference = adjustedOpening - (existing.openingBalance || 0);
+
+      newOpening = adjustedOpening;
+      newCurrent = (existing.currentBalance || 0) + difference;
+    }
+
+    /* -------------------------------
+       CASE 2: Type changed
+       (Customer ↔ Supplier)
+    -------------------------------- */
+    if (type && type !== existing.type && openingBalance === undefined) {
+      // Flip sign of opening
+      newOpening = -existing.openingBalance!;
+      
+      // Flip sign of current balance
+      newCurrent = -existing.currentBalance!;
     }
 
     const updatedParty = await prisma.party.update({
       where: { id },
       data: {
         name: name ?? existing.name,
-        type: type ?? existing.type,
+        type: newType,
         contact: contact ?? existing.contact,
         address: address ?? existing.address,
         gstin: gstin ?? existing.gstin,
-        openingBalance: openingBalance ?? existing.openingBalance,
-        currentBalance: currentBalance ?? existing.currentBalance,
+        openingBalance: newOpening,
+        currentBalance: newCurrent,
       },
     });
 
@@ -117,23 +193,39 @@ export const updateParty = async (req: Request, res: Response): Promise<void> =>
   }
 };
 
-/* ------------------------------ DELETE PARTY ------------------------------ */
-export const deleteParty = async (req: Request, res: Response): Promise<void> => {
+/* =====================================================
+   DELETE PARTY (SAFE DELETE)
+===================================================== */
+export const deleteParty = async (
+  req: Request,
+  res: Response
+): Promise<void> => {
   try {
     const id = Number(req.params.id);
 
-    // Check if party has related invoices/payments before deletion
-    const related = await prisma.invoice.findFirst({ where: { partyId: id } });
-    const paymentRelated = await prisma.payment.findFirst({ where: { partyId: id } });
+    const party = await prisma.party.findUnique({
+      where: { id },
+      include: {
+        _count: {
+          select: { invoices: true, payments: true },
+        },
+      },
+    });
 
-    if (related || paymentRelated) {
-      res
-        .status(400)
-        .json({ error: "Cannot delete party with existing invoices or payments" });
+    if (!party) {
+      res.status(404).json({ error: "Party not found" });
+      return;
+    }
+
+    if (party._count.invoices > 0 || party._count.payments > 0) {
+      res.status(400).json({
+        error: "Cannot delete party with existing invoices or payments",
+      });
       return;
     }
 
     await prisma.party.delete({ where: { id } });
+
     res.json({ message: "Party deleted successfully" });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

@@ -3,12 +3,12 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-// routes/payments.ts or controllers/paymentController.ts
-
+/* =====================================================
+   GET ALL PAYMENTS
+===================================================== */
 export const getAllPayments = async (req: Request, res: Response) => {
   try {
     const { type, partyId, invoiceId, mode, search } = req.query;
-
     const where: any = {};
 
     if (type) where.type = type;
@@ -16,7 +16,6 @@ export const getAllPayments = async (req: Request, res: Response) => {
     if (invoiceId) where.invoiceId = Number(invoiceId);
     if (mode) where.mode = String(mode);
 
-    // Search by note OR party name
     if (search) {
       where.OR = [
         { note: { contains: String(search), mode: "insensitive" } },
@@ -30,57 +29,43 @@ export const getAllPayments = async (req: Request, res: Response) => {
 
     const payments = await prisma.payment.findMany({
       where,
-      include: {
-        party: true,
-        invoice: true,
-      },
-      orderBy: { id: "desc" }, // Latest first
+      include: { party: true, invoice: true },
+      orderBy: { id: "desc" },
     });
 
     res.json(payments);
   } catch (error: any) {
-    console.error("Get payments error:", error);
-    res.status(500).json({ error: error.message || "Failed to fetch payments" });
+    res.status(500).json({ error: error.message });
   }
 };
 
+/* =====================================================
+   GET PAYMENT BY ID
+===================================================== */
 export const getPaymentById = async (req: Request, res: Response) => {
   try {
     const id = Number(req.params.id);
 
-    if (!id) {
-      return res.status(400).json({ error: "Invalid payment ID" });
-    }
-
     const payment = await prisma.payment.findUnique({
       where: { id },
-      include: {
-        party: true,
-        invoice: true,
-      },
+      include: { party: true, invoice: true },
     });
 
-    if (!payment) {
+    if (!payment)
       return res.status(404).json({ error: "Payment not found" });
-    }
 
     res.json(payment);
   } catch (error: any) {
-    console.error("Get payment error:", error);
-    res.status(500).json({ error: error.message || "Failed to fetch payment" });
+    res.status(500).json({ error: error.message });
   }
 };
 
-
+/* =====================================================
+   CREATE PAYMENT
+===================================================== */
 export const createPayment = async (req: Request, res: Response) => {
-  const {
-    type,        // "in" or "out"
-    partyId,
-    amount,
-    mode = "cash",
-    note = "",
-    invoiceId,   // ← NEW: optional invoice link
-  } = req.body;
+  const { type, partyId, amount, mode = "cash", note = "", invoiceId } =
+    req.body;
 
   if (!type || !partyId || !amount || amount <= 0) {
     return res.status(400).json({ error: "Invalid payment data" });
@@ -88,41 +73,44 @@ export const createPayment = async (req: Request, res: Response) => {
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      // 1. Create payment
+      const numericAmount = parseFloat(amount);
+
+      const party = await tx.party.findUnique({
+        where: { id: Number(partyId) },
+      });
+      if (!party) throw new Error("Party not found");
+
+      // 1️⃣ Create payment
       const payment = await tx.payment.create({
         data: {
           type,
-          partyId,
-          amount: parseFloat(amount),
+          partyId: Number(partyId),
+          amount: numericAmount,
           mode,
           note,
           invoiceId: invoiceId ? Number(invoiceId) : null,
         },
-        include: { invoice: true, party: true },
       });
 
-      // 2. Update party balance
-      const party = await tx.party.findUnique({ where: { id: partyId } });
-      if (!party) throw new Error("Party not found");
-
-      const newBalance =
+      // 2️⃣ Update party balance (CORRECT LOGIC)
+      const updatedBalance =
         type === "in"
-          ? (party.currentBalance || 0) + parseFloat(amount)
-          : (party.currentBalance || 0) - parseFloat(amount);
+          ? (party.currentBalance || 0) - numericAmount
+          : (party.currentBalance || 0) + numericAmount;
 
       await tx.party.update({
-        where: { id: partyId },
-        data: { currentBalance: newBalance },
+        where: { id: Number(partyId) },
+        data: { currentBalance: updatedBalance },
       });
 
-      // 3. If linked to invoice → update invoice paidAmount & balance
+      // 3️⃣ Update invoice if linked
       if (invoiceId) {
         const invoice = await tx.invoice.findUnique({
           where: { id: Number(invoiceId) },
         });
 
         if (invoice) {
-          const newPaid = (invoice.paidAmount || 0) + parseFloat(amount);
+          const newPaid = (invoice.paidAmount || 0) + numericAmount;
           const newBalance = invoice.grandTotal - newPaid;
 
           await tx.invoice.update({
@@ -141,12 +129,13 @@ export const createPayment = async (req: Request, res: Response) => {
 
     res.status(201).json(result);
   } catch (error: any) {
-    console.error("Payment error:", error);
-    res.status(500).json({ error: error.message || "Failed to record payment" });
+    res.status(500).json({ error: error.message });
   }
 };
 
-// UPDATE PAYMENT (safe)
+/* =====================================================
+   UPDATE PAYMENT
+===================================================== */
 export const updatePayment = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
   const { type, partyId, amount, invoiceId, mode, note } = req.body;
@@ -156,89 +145,125 @@ export const updatePayment = async (req: Request, res: Response) => {
       const oldPayment = await tx.payment.findUnique({ where: { id } });
       if (!oldPayment) throw new Error("Payment not found");
 
-      // Optional: prevent edit if too old
-      // if (isBefore(new Date(oldPayment.date), startOfMonth(subMonths(new Date(), 1)))) {
-      //   throw new Error("Cannot edit old payments");
-      // }
+      const oldAmount = oldPayment.amount;
 
-      // 1. Revert old amount from party
+      /* =========================
+         1️⃣ REVERT OLD PARTY
+      ========================== */
       const oldParty = await tx.party.findUnique({
-  where: { id: oldPayment.partyId },
-});
+        where: { id: oldPayment.partyId },
+      });
 
-if (oldParty) {
-  let revertBalance = oldParty.currentBalance || 0;
+      if (oldParty) {
+        const revertedBalance =
+          oldPayment.type === "in"
+            ? (oldParty.currentBalance || 0) + oldAmount
+            : (oldParty.currentBalance || 0) - oldAmount;
 
-  if (oldPayment.type === "in") {
-    revertBalance -= oldPayment.amount; // Payment IN means party owes LESS → undo by subtracting
-  } else if (oldPayment.type === "out") {
-    revertBalance += oldPayment.amount; // Payment OUT means party owes MORE → undo by adding
-  }
+        await tx.party.update({
+          where: { id: oldPayment.partyId },
+          data: { currentBalance: revertedBalance },
+        });
+      }
 
-  await tx.party.update({
-    where: { id: oldPayment.partyId },
-    data: { currentBalance: revertBalance },
-  });
-}
-
-
-      // 2. Revert invoice paidAmount if linked
+      /* =========================
+         2️⃣ REVERT OLD INVOICE
+      ========================== */
       if (oldPayment.invoiceId) {
-        const inv = await tx.invoice.findUnique({ where: { id: oldPayment.invoiceId } });
-        if (inv) {
+        const oldInvoice = await tx.invoice.findUnique({
+          where: { id: oldPayment.invoiceId },
+        });
+
+        if (oldInvoice) {
+          const newPaid = Math.max(
+            0,
+            (oldInvoice.paidAmount || 0) - oldAmount
+          );
+
           await tx.invoice.update({
             where: { id: oldPayment.invoiceId },
             data: {
-              paidAmount: Math.max(0, (inv.paidAmount || 0) - oldPayment.amount),
-              balance: inv.grandTotal - Math.max(0, (inv.paidAmount || 0) - oldPayment.amount),
+              paidAmount: newPaid,
+              balance: oldInvoice.grandTotal - newPaid,
+              status:
+                oldInvoice.grandTotal - newPaid <= 0
+                  ? "paid"
+                  : newPaid === 0
+                  ? "draft"
+                  : "partial",
             },
           });
         }
       }
 
-      // 3. Apply new values
-      const newAmount = parseFloat(amount);
-      const party = await tx.party.findUnique({ where: { id: partyId } });
-      if (party) {
-        const newBalance = type === "in"
-          ? (party.currentBalance || 0) + newAmount
-          : (party.currentBalance || 0) - newAmount;
+      /* =========================
+         3️⃣ APPLY NEW VALUES
+      ========================== */
+
+      const numericAmount = parseFloat(amount);
+
+      const newParty = await tx.party.findUnique({
+        where: { id: Number(partyId) },
+      });
+
+      if (newParty) {
+        const updatedBalance =
+          type === "in"
+            ? (newParty.currentBalance || 0) - numericAmount
+            : (newParty.currentBalance || 0) + numericAmount;
+
         await tx.party.update({
-          where: { id: partyId },
-          data: { currentBalance: newBalance },
+          where: { id: Number(partyId) },
+          data: { currentBalance: updatedBalance },
         });
       }
 
-      // Update invoice if linked
       if (invoiceId) {
-        const inv = await tx.invoice.findUnique({ where: { id: Number(invoiceId) } });
-        if (inv) {
-          const newPaid = (inv.paidAmount || 0) + newAmount;
+        const invoice = await tx.invoice.findUnique({
+          where: { id: Number(invoiceId) },
+        });
+
+        if (invoice) {
+          const newPaid = (invoice.paidAmount || 0) + numericAmount;
+
           await tx.invoice.update({
             where: { id: Number(invoiceId) },
             data: {
               paidAmount: newPaid,
-              balance: Math.max(0, inv.grandTotal - newPaid),
-              status: inv.grandTotal - newPaid <= 0 ? "paid" : "partial",
+              balance: Math.max(0, invoice.grandTotal - newPaid),
+              status:
+                invoice.grandTotal - newPaid <= 0 ? "paid" : "partial",
             },
           });
         }
       }
 
-      // Finally update payment
+      /* =========================
+         4️⃣ UPDATE PAYMENT RECORD
+      ========================== */
+
       await tx.payment.update({
         where: { id },
-        data: { type, partyId, amount: newAmount, invoiceId: invoiceId ? Number(invoiceId) : null, mode, note },
+        data: {
+          type,
+          partyId: Number(partyId),
+          amount: numericAmount,
+          invoiceId: invoiceId ? Number(invoiceId) : null,
+          mode,
+          note,
+        },
       });
     });
 
-    res.json({ message: "Payment updated" });
+    res.json({ message: "Payment updated successfully" });
   } catch (error: any) {
-    res.status(500).json({ "error": error.message } );
+    res.status(500).json({ error: error.message });
   }
 };
 
-// DELETE PAYMENT (safe)
+/* =====================================================
+   DELETE PAYMENT
+===================================================== */
 export const deletePayment = async (req: Request, res: Response) => {
   const id = Number(req.params.id);
 
@@ -247,28 +272,46 @@ export const deletePayment = async (req: Request, res: Response) => {
       const payment = await tx.payment.findUnique({ where: { id } });
       if (!payment) throw new Error("Payment not found");
 
-      // Revert party balance
-      const party = await tx.party.findUnique({ where: { id: payment.partyId } });
+      /* Revert party balance */
+      const party = await tx.party.findUnique({
+        where: { id: payment.partyId },
+      });
+
       if (party) {
-        const newBalance = payment.type === "in"
-          ? (party.currentBalance || 0) - payment.amount
-          : (party.currentBalance || 0) + payment.amount;
+        const revertedBalance =
+          payment.type === "in"
+            ? (party.currentBalance || 0) + payment.amount
+            : (party.currentBalance || 0) - payment.amount;
+
         await tx.party.update({
           where: { id: payment.partyId },
-          data: { currentBalance: newBalance },
+          data: { currentBalance: revertedBalance },
         });
       }
 
-      // Revert invoice if linked
+      /* Revert invoice */
       if (payment.invoiceId) {
-        const inv = await tx.invoice.findUnique({ where: { id: payment.invoiceId } });
-        if (inv) {
+        const invoice = await tx.invoice.findUnique({
+          where: { id: payment.invoiceId },
+        });
+
+        if (invoice) {
+          const newPaid = Math.max(
+            0,
+            (invoice.paidAmount || 0) - payment.amount
+          );
+
           await tx.invoice.update({
             where: { id: payment.invoiceId },
             data: {
-              paidAmount: Math.max(0, (inv.paidAmount || 0) - payment.amount),
-              balance: inv.grandTotal - Math.max(0, (inv.paidAmount || 0) - payment.amount),
-              status: "partial",
+              paidAmount: newPaid,
+              balance: invoice.grandTotal - newPaid,
+              status:
+                invoice.grandTotal - newPaid <= 0
+                  ? "paid"
+                  : newPaid === 0
+                  ? "draft"
+                  : "partial",
             },
           });
         }
@@ -277,7 +320,7 @@ export const deletePayment = async (req: Request, res: Response) => {
       await tx.payment.delete({ where: { id } });
     });
 
-    res.json({ message: "Payment deleted" });
+    res.json({ message: "Payment deleted successfully" });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
